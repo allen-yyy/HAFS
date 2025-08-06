@@ -1,8 +1,5 @@
 /* SPDX-License-Identifier: MIT */
 
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
 #define SEG_BLOCK 1024
 
 #pragma pack(1)
@@ -76,18 +73,10 @@ struct MBR
     unsigned short reserve_sector;
     unsigned int unused1;
     unsigned short type;
-    unsigned int unused2;
+    unsigned int unused1;
     unsigned int sig;
     unsigned long long sector_number;
     unsigned int version;
-    unsigned int super_sector_start;
-};
-
-struct dir_entry
-{
-    unsigned int next_record;
-    unsigned int inode;
-    char *name;
 };
 
 #ifndef NULL
@@ -96,20 +85,3 @@ struct dir_entry
 
 #define _f(x) (x?1:0)
 #define round(x,y) ((x)/(y)+_f(((x)%(y))))
-
-#define RESERVE_SECTOR 0
-
-int hafs_make_fs(int storage, unsigned long long size, unsigned int block_size, unsigned int inode_number);
-int hafs_load_fs(int storage);
-unsigned int hafs_create_file(int slot, const char *path, unsigned int pathlen, const char *filename, unsigned int namelen);
-int hafs_delete_file(int slot, const char *filename, int namelen);
-char *hafs_read_file(int slot, const char *file_name, unsigned int namelen, unsigned long long pos, unsigned long long size);
-int hafs_write_file(int slot, const char *file_name, unsigned int namelen, unsigned long long pos, unsigned long long size, const char *buf);
-unsigned int hafs_make_dir(int slot, const char *path, unsigned int pathlen, const char *dirname, unsigned int namelen);
-int hafs_rewrite_file(int slot, const char *file_name, unsigned int namelen, unsigned long long size, const char *buf);
-unsigned long long hafs_get_file_size(int slot, const char *filename, unsigned int namelen);
-struct dir_entry *hafs_dir_list(int slot, const char *dirname, unsigned int namelen, unsigned int *entry_number);
-unsigned int hafs_get_file_attribute(int slot, const char *filename, unsigned int namelen);
-unsigned long long hafs_get_file_size_by_inode(int slot, unsigned int inode);
-unsigned int hafs_get_file_attribute_by_inode(int slot, unsigned int inode);
-int hafs_file_exist(int slot, const char *filename, unsigned int namelen);
