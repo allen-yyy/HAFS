@@ -4,8 +4,8 @@ Haribote File System—A fast, simple file system designed for light operating s
 
 The specification could be found [here][document]
 
-[logo]: assets/mascot.png
-[document]: assets/hafs1.0.pdf
+[logo]: asset/mascot.png
+[document]: asset/hafs1.0.pdf
 
 ### Usage
 
