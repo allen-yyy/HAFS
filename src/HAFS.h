@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #define SEG_BLOCK 1024
 
 #pragma pack(1)
@@ -62,10 +63,11 @@ struct inode
     unsigned int indirect_3[4];
 };
 
-#define ADDITION_INODE      0x1
-#define ADDITION_LONG_NAME  0x2
-#define ADDITION_LINK_INODE 0x4
-#define ADDITION_FA_INODE   0x8
+#define ADDITION_LONG_NAME      0x2
+#define ADDITION_FA_INODE       0x8
+#define ADDITION_CREATE_TIME    0x10
+#define ADDITION_ACCESS_TIME    0x20
+#define ADDITION_MODIFY_TIME    0x40
 
 struct MBR
 {
@@ -113,3 +115,9 @@ unsigned int hafs_get_file_attribute(int slot, const char *filename, unsigned in
 unsigned long long hafs_get_file_size_by_inode(int slot, unsigned int inode);
 unsigned int hafs_get_file_attribute_by_inode(int slot, unsigned int inode);
 int hafs_file_exist(int slot, const char *filename, unsigned int namelen);
+int hafs_file_access(int slot, unsigned int inode, unsigned int o_time);
+int hafs_file_modify(int slot, unsigned int inode, unsigned int o_time);
+int hafs_file_read_access_time(int slot, unsigned int inode);
+int hafs_file_read_modify_time(int slot, unsigned int inode);
+int hafs_file_write_additional_block(int slot, unsigned int inode, char *buffer, unsigned int size);
+int hafs_file_read_create_time(int slot, unsigned int inode);

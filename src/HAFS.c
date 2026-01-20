@@ -128,7 +128,7 @@ int hafs_make_fs(int storage, unsigned long long size, unsigned int block_size, 
     if(block_size != 1024 && block_size != 2048 && block_size != 4096) return -1;
     if(inode_number % (block_size / sizeof(struct inode))) return -1;
     if(size % block_size) return -1;
-    if(((block_size == 1024 || block_size == 2048) && inode_number > 4096) || (block_size == 4096 && inode_number > 20480)) return -1;
+    if(((block_size == 1024 || block_size == 2048) && inode_number > 8192) || (block_size == 4096 && inode_number > 20480)) return -1;
     if(size < block_size * 1024) return -2;
 
     struct MBR _mbr;
@@ -279,7 +279,7 @@ struct inode *hafs_get_inode(int slot, unsigned int inode)
     }
 
     struct inode *node = (struct inode *)(read_disk(slot_storage[slot], seg_start + sss->inode_rel_start + inode_in_seg_sector, 1) + inode_in_sector * sizeof(struct inode));
-    if(node->type & INODE_PRESENT == 0) return NULL;
+    if((node->type & INODE_PRESENT) == 0) return NULL;
     return node;
 }
 
@@ -970,8 +970,6 @@ int hafs_file_alloc_block(int slot, int inode, int add_number)
             }else ind1 = (unsigned int *)hafs_get_block(slot, node->indirect_1[i]);
             for(int k=0;k<ss[slot]->block_size / sizeof(unsigned int);k++)
             {
-//                if(12 + (i+1)*k < start_block) continue;
-//				if(ind1[k]) continue;
 				if(block_cnt < start_block)
 				{
 					block_cnt++;
@@ -1015,8 +1013,6 @@ int hafs_file_alloc_block(int slot, int inode, int add_number)
                 }else ind1 = (unsigned int *)hafs_get_block(slot, ind2[i]);
                 for(int k=0;k<ss[slot]->block_size / sizeof(unsigned int);k++)
                 {
-//                    if(12 + 8 * ss[slot]->block_size / sizeof(unsigned int) + (m+1)*(i+1)*k < start_block) continue;
-//					if(ind1[k]) continue;
 					if(block_cnt < start_block)
 					{
 						block_cnt++;
@@ -1072,7 +1068,6 @@ int hafs_file_alloc_block(int slot, int inode, int add_number)
                     }else ind1 = (unsigned int *)hafs_get_block(slot, ind2[i]);
                     for(int k=0;k<ss[slot]->block_size / sizeof(unsigned int);k++)
                     {
-//                        if(12 + 8 * ss[slot]->block_size / sizeof(unsigned int) + 4 * ss[slot]->block_size / sizeof(unsigned int) * ss[slot]->block_size / sizeof(unsigned int) + (n+1)*(m+1)*(i+1)*k < start_block) continue;
                         if(ind1[k]) continue;
 						ind1[k] = blocks[block_index];
                         block_index++;
@@ -1329,14 +1324,14 @@ int hafs_file_free_block(int slot, int inode, int start_block)
 unsigned int hafs_create_file(int slot, const char *path, unsigned int pathlen, const char *filename, unsigned int namelen)
 {
     if(slot >= cnt) return 0;
-    if(namelen > 65536) return 0; 
+    if(namelen >= 65536 || namelen == 0) return 0; 
 
     int fa_inode;
     if(pathlen==1&&path[0]=='\\') fa_inode = ss[slot]->root_inode;
     else if((fa_inode = hafs_find_inode(slot, path, pathlen, ss[slot]->root_inode)) == 0) return 0;
 
     struct inode *inode = hafs_get_inode(slot, fa_inode);
-    if(inode->type & INODE_DIR == 0) return 0;
+    if((inode->type & INODE_DIR) == 0) return 0;
     if(inode->file_size)
     {
         char *dir_entry = (char *)malloc(round(inode->file_size+4+4+namelen, ss[slot]->block_size) * ss[slot]->block_size);
@@ -1374,6 +1369,28 @@ unsigned int hafs_create_file(int slot, const char *path, unsigned int pathlen, 
             if(hafs_file_alloc_block(slot, fa_inode, round(inode->file_size+4+4+namelen, ss[slot]->block_size) - round(inode->file_size, ss[slot]->block_size))) return 0;
         }
 
+        char *inode_bitmap = read_disk(slot_storage[slot], ss[slot]->inode_map_start, ss[slot]->inode_map_size);
+        if(bit_map_find(inode_bitmap, ss[slot]->seg_number) == -1) return 0;
+        
+        char *block_bitmap = read_disk(slot_storage[slot], ss[slot]->block_map_start, ss[slot]->block_map_size);
+        int t=0, num=0, block_number = 1 + round(inode->file_size+4+4+namelen, ss[slot]->block_size) - round(inode->file_size, ss[slot]->block_size);
+        while(((t = bit_map_find_mask(block_bitmap, ss[slot]->seg_number, t)) != -1))
+        {
+            struct seg_super_sector *sss;
+            unsigned long long seg_start = 0;
+            if(t == 0)
+            {
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->zero_seg_start * ss[slot]->block_size / 0x200, 1);
+                seg_start = 0;
+            }else{
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->block_size / 0x200 * SEG_BLOCK * t, 1);
+                seg_start = ss[slot]->block_size / 0x200 * SEG_BLOCK * t;
+            }
+            num+=sss->block_left;
+            if(num>=block_number) break;
+        }
+        if(num<block_number) return 0;
+
         unsigned int new_inode = hafs_alloc_inode(slot);
         if(!new_inode) return 0;
         *next_record = inode->file_size-((char *)next_record-dir_entry);
@@ -1389,12 +1406,58 @@ unsigned int hafs_create_file(int slot, const char *path, unsigned int pathlen, 
         node.type = INODE_PRESENT | INODE_FILE;
         hafs_set_inode(slot, new_inode, &node);
 
+        unsigned int o_time = time(NULL);
+
+        char *buf = (char *)malloc(37);
+
+        point_now = buf;
+        *(unsigned int *)point_now = 12;
+        *((unsigned int *)point_now + 1) = ADDITION_CREATE_TIME;
+        *((unsigned int *)point_now + 2) = o_time;
+
+        point_now += 12;
+        *(unsigned int *)point_now = 12;
+        *((unsigned int *)point_now + 1) = ADDITION_ACCESS_TIME;
+        *((unsigned int *)point_now + 2) = o_time;
+
+        point_now += 12;
+        *(unsigned int *)point_now = 12;
+        *((unsigned int *)point_now + 1) = ADDITION_MODIFY_TIME;
+        *((unsigned int *)point_now + 2) = o_time;
+
+        *(buf + 36) = 0;
+        hafs_file_write_additional_block(slot, new_inode, buf, 37);
+
         inode = hafs_get_inode(slot, fa_inode);
         inode->file_size += 4+4+namelen;
         hafs_set_inode(slot, fa_inode, inode);
 
+        free(dir_entry);
+
         return new_inode;
     }else{
+        char *inode_bitmap = read_disk(slot_storage[slot], ss[slot]->inode_map_start, ss[slot]->inode_map_size);
+        if(bit_map_find(inode_bitmap, ss[slot]->seg_number) == -1) return 0;
+        
+        char *block_bitmap = read_disk(slot_storage[slot], ss[slot]->block_map_start, ss[slot]->block_map_size);
+        int t=0, num=0, block_number = 1 + round(4+4+namelen, ss[slot]->block_size);
+        while(((t = bit_map_find_mask(block_bitmap, ss[slot]->seg_number, t)) != -1))
+        {
+            struct seg_super_sector *sss;
+            unsigned long long seg_start = 0;
+            if(t == 0)
+            {
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->zero_seg_start * ss[slot]->block_size / 0x200, 1);
+                seg_start = 0;
+            }else{
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->block_size / 0x200 * SEG_BLOCK * t, 1);
+                seg_start = ss[slot]->block_size / 0x200 * SEG_BLOCK * t;
+            }
+            num+=sss->block_left;
+            if(num>=block_number) break;
+        }
+        if(num<block_number) return 0;
+
         if(hafs_file_alloc_block(slot, fa_inode, round(4+4+namelen, ss[slot]->block_size))) return 0;
         char *dir_entry = (char *)malloc(round(4+4+namelen, ss[slot]->block_size) * ss[slot]->block_size);
         memset(dir_entry, 0, round(4+4+namelen, ss[slot]->block_size) * ss[slot]->block_size);
@@ -1414,6 +1477,30 @@ unsigned int hafs_create_file(int slot, const char *path, unsigned int pathlen, 
         memset(&node, 0, sizeof(node));
         node.type = INODE_PRESENT | INODE_FILE;
         hafs_set_inode(slot, new_inode, &node);
+
+        unsigned int o_time = time(NULL);
+
+        char *buf = (char *)malloc(37);
+
+        char *point_now = buf;
+        *(unsigned int *)point_now = 12;
+        *((unsigned int *)point_now + 1) = ADDITION_CREATE_TIME;
+        *((unsigned int *)point_now + 2) = o_time;
+
+        point_now += 12;
+        *(unsigned int *)point_now = 12;
+        *((unsigned int *)point_now + 1) = ADDITION_ACCESS_TIME;
+        *((unsigned int *)point_now + 2) = o_time;
+
+        point_now += 12;
+        *(unsigned int *)point_now = 12;
+        *((unsigned int *)point_now + 1) = ADDITION_MODIFY_TIME;
+        *((unsigned int *)point_now + 2) = o_time;
+
+        *(buf + 36) = 0;
+        hafs_file_write_additional_block(slot, new_inode, buf, 37);
+
+        free(dir_entry);
 
         return new_inode;
     }
@@ -1436,6 +1523,9 @@ char *hafs_read_file(int slot, const char *file_name, unsigned int namelen, unsi
     if(tmp == NULL) return NULL;
     char *res = (char *)malloc(size);
     memcpy(res, tmp + pos - block_start * ss[slot]->block_size, size);
+
+    hafs_file_access(slot, inode, time(NULL));
+
     return res;
 }
 
@@ -1448,7 +1538,35 @@ int hafs_write_file(int slot, const char *file_name, unsigned int namelen, unsig
 
     struct inode *node = hafs_get_inode(slot, inode);
     if(node == NULL) return -1;
+    if(node->type & INODE_RDONLY) return -1;
     if(pos > node->file_size) return -1;
+
+    if(round(node->file_size + size, ss[slot]->block_size) - round(node->file_size, ss[slot]->block_size))
+    {
+        char *block_bitmap = read_disk(slot_storage[slot], ss[slot]->block_map_start, ss[slot]->block_map_size);
+        int t=0, num=0, block_number = round(node->file_size + size, ss[slot]->block_size) - round(node->file_size, ss[slot]->block_size);
+        while(((t = bit_map_find_mask(block_bitmap, ss[slot]->seg_number, t)) != -1))
+        {
+            struct seg_super_sector *sss;
+            unsigned long long seg_start = 0;
+            if(t == 0)
+            {
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->zero_seg_start * ss[slot]->block_size / 0x200, 1);
+                seg_start = 0;
+            }else{
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->block_size / 0x200 * SEG_BLOCK * t, 1);
+                seg_start = ss[slot]->block_size / 0x200 * SEG_BLOCK * t;
+            }
+            num+=sss->block_left;
+            if(num>=block_number) break;
+        }
+        if(num<block_number) return 0;
+    }
+
+    unsigned int o_time = time(NULL);
+    hafs_file_access(slot, inode, o_time);
+    hafs_file_modify(slot, inode, o_time);
+
     if(round(node->file_size + size, ss[slot]->block_size) - round(node->file_size, ss[slot]->block_size))
     {
         if(hafs_file_alloc_block(slot, inode, round(node->file_size + size, ss[slot]->block_size) - round(node->file_size, ss[slot]->block_size)) == -1) return -1;
@@ -1464,7 +1582,13 @@ int hafs_write_file(int slot, const char *file_name, unsigned int namelen, unsig
 	node = hafs_get_inode(slot, inode);
     node->file_size += size;
     hafs_set_inode(slot, inode, node);
-    if(hafs_put_file_data(slot, inode, block_start, round(node->file_size, ss[slot]->block_size) - block_start, res) == -1) return -1;
+    if(hafs_put_file_data(slot, inode, block_start, round(node->file_size, ss[slot]->block_size) - block_start, res) == -1)
+    {
+        return -1;
+        fres(res);
+    }
+
+    free(res);
 
     return 0;
 }
@@ -1478,6 +1602,34 @@ int hafs_rewrite_file(int slot, const char *file_name, unsigned int namelen, uns
 
     struct inode *node = hafs_get_inode(slot, inode);
     if(node == NULL) return -1;
+    if(node->type & INODE_RDONLY) return -1;
+
+    if(round(node->file_size + size, ss[slot]->block_size) > round(node->file_size, ss[slot]->block_size))
+    {
+        char *block_bitmap = read_disk(slot_storage[slot], ss[slot]->block_map_start, ss[slot]->block_map_size);
+        int t=0, num=0, block_number = round(node->file_size + size, ss[slot]->block_size) - round(node->file_size, ss[slot]->block_size);
+        while(((t = bit_map_find_mask(block_bitmap, ss[slot]->seg_number, t)) != -1))
+        {
+            struct seg_super_sector *sss;
+            unsigned long long seg_start = 0;
+            if(t == 0)
+            {
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->zero_seg_start * ss[slot]->block_size / 0x200, 1);
+                seg_start = 0;
+            }else{
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->block_size / 0x200 * SEG_BLOCK * t, 1);
+                seg_start = ss[slot]->block_size / 0x200 * SEG_BLOCK * t;
+            }
+            num+=sss->block_left;
+            if(num>=block_number) break;
+        }
+        if(num<block_number) return 0;
+    }
+
+    unsigned int o_time = time(NULL);
+    hafs_file_access(slot, inode, o_time);
+    hafs_file_modify(slot, inode, o_time);
+
     if(round(size, ss[slot]->block_size) > round(node->file_size, ss[slot]->block_size))
     {
         if(hafs_file_alloc_block(slot, inode, round(size, ss[slot]->block_size) - round(node->file_size, ss[slot]->block_size)) == -1) return -1;
@@ -1493,7 +1645,13 @@ int hafs_rewrite_file(int slot, const char *file_name, unsigned int namelen, uns
     memset(buffer, 0, round(size, ss[slot]->block_size) * ss[slot]->block_size);
     memcpy(buffer, buf, size);
 
-    if(hafs_put_file_data(slot, inode, 0, round(size, ss[slot]->block_size), buffer) == -1) return -1;
+    if(hafs_put_file_data(slot, inode, 0, round(size, ss[slot]->block_size), buffer) == -1)
+    {
+        free(buffer);
+        return -1;
+    }
+
+    free(buffer);
 
     return 0;
 }
@@ -1501,14 +1659,14 @@ int hafs_rewrite_file(int slot, const char *file_name, unsigned int namelen, uns
 unsigned int hafs_make_dir(int slot, const char *path, unsigned int pathlen, const char *dirname, unsigned int namelen)
 {
     if(slot >= cnt) return 0;
-    if(namelen > 65536 || namelen == 0) return 0;
+    if(namelen >= 65536 || namelen == 0) return 0;
 
     int fa_inode;
     if(pathlen==1&&path[0]=='\\') fa_inode = ss[slot]->root_inode;
     else if((fa_inode = hafs_find_inode(slot, path, pathlen, ss[slot]->root_inode)) == 0) return 0;
 
     struct inode *inode = hafs_get_inode(slot, fa_inode);
-    if(inode->type & INODE_DIR == 0) return 0;
+    if((inode->type & INODE_DIR) == 0) return 0;
     if(inode->file_size)
     {
         char *dir_entry = (char *)malloc(round(inode->file_size+4+4+namelen, ss[slot]->block_size) * ss[slot]->block_size);
@@ -1565,6 +1723,20 @@ unsigned int hafs_make_dir(int slot, const char *path, unsigned int pathlen, con
         inode->file_size += 4+4+namelen;
         hafs_set_inode(slot, fa_inode, inode);
 
+        unsigned int o_time = time(NULL);
+
+        char *buf = (char *)malloc(13);
+
+        point_now = buf;
+        *(unsigned int *)point_now = 12;
+        *((unsigned int *)point_now + 1) = ADDITION_CREATE_TIME;
+        *((unsigned int *)point_now + 2) = o_time;
+
+        *(buf + 12) = 0;
+        hafs_file_write_additional_block(slot, new_inode, buf, 13);
+
+        free(dir_entry);
+
         return new_inode;
     }else{
         if(hafs_file_alloc_block(slot, fa_inode, round(4+4+namelen, ss[slot]->block_size))) return 0;
@@ -1587,6 +1759,20 @@ unsigned int hafs_make_dir(int slot, const char *path, unsigned int pathlen, con
         node.type = INODE_PRESENT | INODE_DIR;
         hafs_set_inode(slot, new_inode, &node);
 
+        unsigned int o_time = time(NULL);
+
+        char *buf = (char *)malloc(13);
+
+        char *point_now = buf;
+        *(unsigned int *)point_now = 12;
+        *((unsigned int *)point_now + 1) = ADDITION_CREATE_TIME;
+        *((unsigned int *)point_now + 2) = o_time;
+
+        *(buf + 12) = 0;
+        hafs_file_write_additional_block(slot, new_inode, buf, 13);
+
+        free(dir_entry);
+
         return new_inode;
     }
     return 0;
@@ -1595,6 +1781,8 @@ unsigned int hafs_make_dir(int slot, const char *path, unsigned int pathlen, con
 int hafs_delete_file(int slot, const char *filename, int namelen)
 {
 	if(slot>=cnt) return -1;
+
+    
 	
 	if(filename[namelen-1]=='\\') namelen--;
 	int len = namelen;
@@ -1606,7 +1794,7 @@ int hafs_delete_file(int slot, const char *filename, int namelen)
 	if(fa_inode == 0 && !(len==1 && filename[0]=='\\')) return -1;
 	
 	struct inode *inode = hafs_get_inode(slot, fa_inode);
-    if(inode->type & INODE_DIR == 0) return -1;
+    if((inode->type & INODE_DIR) == 0) return -1;
     if(inode->file_size == 0) return -1;
 	
 	unsigned n_inode=0;
@@ -1643,12 +1831,17 @@ int hafs_delete_file(int slot, const char *filename, int namelen)
         }
     }
     if(!n_inode) return -1;
+
+    struct inode *tmp_inode = hafs_get_inode(slot, n_inode);
+    if((tmp_inode->type & INODE_DIR) && (tmp_inode->file_size != 0)) return -1;
+
     unsigned int block_number = round(inode->file_size,ss[slot]->block_size);
 	if(*next_record)
 	{
 		char *tmem = (char *)malloc(inode->file_size - *next_record - ((char *)next_record - dir));
 		memcpy(tmem, ((char *)next_record) + *next_record, inode->file_size - *next_record - ((char *)next_record - dir));
 		memcpy(next_record, tmem, inode->file_size - *next_record - ((char *)next_record - dir));
+        free(tmem);
 	}else{
 		*last_record = 0;
 	}
@@ -1661,7 +1854,8 @@ int hafs_delete_file(int slot, const char *filename, int namelen)
 		char *pmem = (char *)malloc(round(inode->file_size,ss[slot]->block_size));
 		memset(pmem, 0, round(inode->file_size,ss[slot]->block_size));
 		memcpy(pmem, dir, inode->file_size);
-		hafs_put_file_data(slot, fa_inode, 0, round(inode->file_size, ss[slot]->block_size), dir);
+		hafs_put_file_data(slot, fa_inode, 0, round(inode->file_size, ss[slot]->block_size), pmem);
+        free(pmem);
 	}
 	hafs_file_free_block(slot, n_inode, 0);
 	inode = hafs_get_inode(slot, n_inode);
@@ -1669,6 +1863,131 @@ int hafs_delete_file(int slot, const char *filename, int namelen)
 	memset(inode, 0, sizeof(struct inode));
 	hafs_set_inode(slot, n_inode, inode);
 	hafs_free_inode(slot, n_inode);
+	return 0;
+}
+
+int hafs_rename_file(int slot, const char *filename, int namelen, const char *newname, int newnamelen)
+{
+	if(slot>=cnt) return -1;
+    if(newnamelen >= 65536 || namelen == 0) return -1;
+	
+	if(filename[namelen-1]=='\\') namelen--;
+	int len = namelen;
+	while(filename[len-1]!='\\') len--;
+    namelen -= len;
+	
+	unsigned int fa_inode;
+	fa_inode = hafs_find_inode(slot, filename, len, ss[slot]->root_inode);
+	if(fa_inode == 0 && !(len==1 && filename[0]=='\\')) return -1;
+	
+	struct inode *inode = hafs_get_inode(slot, fa_inode);
+    if((inode->type & INODE_DIR) == 0) return -1;
+    if(inode->file_size == 0) return -1;
+	
+	unsigned n_inode=0;
+	char *dir = hafs_get_file_data(slot, fa_inode, 0, round(inode->file_size, ss[slot]->block_size));
+    char *point_now = dir;
+    unsigned int *next_record = (unsigned int *)point_now;
+    unsigned int *last_record = (unsigned int *)point_now;
+    unsigned int record_len = 0;
+    while(*next_record != 0)
+    {
+        char *fname = point_now + 8;
+        unsigned int _len = *next_record - 8;
+        if(_len == namelen)
+        {
+            if(!memcmp(fname, filename + len, _len))
+            {
+            	n_inode = *(unsigned int *)(point_now + 4);
+            	record_len = len + 8;
+                break;
+            }
+        }
+        last_record = (unsigned int *)point_now;
+        point_now += *next_record;
+        next_record = (unsigned int *)point_now;
+    }
+    char *fname = point_now + 8;
+    unsigned int _len = inode->file_size - (point_now - dir) - 8;
+    if(_len == namelen)
+    {
+        if(!memcmp(fname, filename + len, _len))
+        {
+            n_inode = *(unsigned int *)(point_now + 4);
+            record_len = _len + 8;
+        }
+    }
+    if(!n_inode) return -1;
+
+    if(round(inode->file_size,ss[slot]->block_size) < round(inode->file_size - record_len + 4 + 4 + newnamelen,ss[slot]->block_size))
+    {
+        char *block_bitmap = read_disk(slot_storage[slot], ss[slot]->block_map_start, ss[slot]->block_map_size);
+        int t=0, num=0, block_number = 1 + round(inode->file_size - record_len + 4 + 4 + newnamelen,ss[slot]->block_size) - round(inode->file_size,ss[slot]->block_size); 
+        while(((t = bit_map_find_mask(block_bitmap, ss[slot]->seg_number, t)) != -1))
+        {
+            struct seg_super_sector *sss;
+            unsigned long long seg_start = 0;
+            if(t == 0)
+            {
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->zero_seg_start * ss[slot]->block_size / 0x200, 1);
+                seg_start = 0;
+            }else{
+                sss = (struct seg_super_sector *)read_disk(slot_storage[slot], ss[slot]->block_size / 0x200 * SEG_BLOCK * t, 1);
+                seg_start = ss[slot]->block_size / 0x200 * SEG_BLOCK * t;
+            }
+            num+=sss->block_left;
+            if(num>=block_number) break;
+        }
+        if(num<block_number) return 0;
+    }
+
+    int o_time = time(NULL);
+    hafs_file_access(slot, n_inode, o_time);
+    hafs_file_modify(slot, n_inode, o_time);
+
+    unsigned int block_number = round(inode->file_size,ss[slot]->block_size);
+    char *tmem = (char *)malloc(inode->file_size - record_len + 4 + 4 + newnamelen);
+	if(*next_record)
+	{
+		memcpy(tmem, ((char *)next_record) + *next_record, inode->file_size - *next_record - ((char *)next_record - dir));
+        memcpy(next_record, tmem, inode->file_size - *next_record - ((char *)next_record - dir));
+        memcpy(tmem, dir, inode->file_size - record_len);
+        point_now = tmem;
+        next_record = (unsigned int *)point_now;
+        while(*next_record != 0)
+        {
+            point_now += *next_record;
+            next_record = (unsigned int *)point_now;
+        }
+        *next_record = inode->file_size - record_len;
+        point_now += *next_record;
+        next_record = (unsigned int *)point_now;
+        *next_record = 0;
+        memcpy(point_now + 8, newname, newnamelen);
+        *(unsigned int *)(point_now + 4) = n_inode;
+    }else{
+		memcpy(tmem, dir, inode->file_size);
+        point_now = tmem + (point_now - dir);
+        memcpy(point_now + 8, newname, newnamelen);
+	}
+	if(block_number > round(inode->file_size - record_len + 4 + 4 + newnamelen,ss[slot]->block_size))
+    {
+        hafs_file_free_block(slot, fa_inode, round(inode->file_size - record_len + 4 + 4 + newnamelen, ss[slot]->block_size));
+    }else if(block_number < round(inode->file_size - record_len + 4 + 4 + newnamelen,ss[slot]->block_size)){
+        hafs_file_alloc_block(slot, fa_inode, round(inode->file_size - record_len + 4 + 4 + newnamelen, ss[slot]->block_size) - block_number);
+    }
+
+    inode = hafs_get_inode(slot, fa_inode);
+	inode->file_size = inode->file_size - record_len + 4 + 4 + newnamelen;
+	hafs_set_inode(slot, fa_inode, inode);
+    char *pmem = (char *)malloc(round(inode->file_size, ss[slot]->block_size));
+    memset(pmem, 0, round(inode->file_size, ss[slot]->block_size));
+    memcpy(pmem, tmem, inode->file_size);
+    hafs_put_file_data(slot, fa_inode, 0, round(inode->file_size, ss[slot]->block_size), tmem);
+    
+    free(tmem);
+    free(pmem);
+
 	return 0;
 }
 
@@ -1691,7 +2010,7 @@ struct dir_entry *hafs_dir_list(int slot, const char *dirname, unsigned int name
 	if(inode == 0 && !(namelen==1 && dirname[0]=='\\')) return NULL;
     struct inode *node = hafs_get_inode(slot, inode);
 	if(node == NULL) return NULL;
-    if(node->type & INODE_DIR == 0) return NULL;
+    if((node->type & INODE_DIR) == 0) return NULL;
     
     *entry_number = 0;
     if(node->file_size == 0) return NULL;
@@ -1769,4 +2088,516 @@ int hafs_file_exist(int slot, const char *filename, unsigned int namelen)
 	if(slot >= cnt) return 0;
 	if(namelen == 1 && filename[0]=='\\') return 1;
 	return hafs_find_inode(slot, filename, namelen, ss[slot]->root_inode) != 0;
+}
+
+int hafs_file_add_additional_block(int slot, unsigned int inode)
+{
+    if(slot >= cnt) return -1;
+
+    struct inode *node = hafs_get_inode(slot, inode);
+    if(node == NULL) return -1;
+
+    char *buf;
+
+    if((node->type & INODE_ADDITIONAL) == 0)
+    {
+        node->type |= INODE_ADDITIONAL;
+        node->additional_block = hafs_alloc_block(slot);
+        hafs_set_inode(slot, inode, node);
+        buf = (char *)malloc(ss[slot]->block_size);
+        memset(buf, 0, ss[slot]->block_size);
+    }else{
+        buf = hafs_get_block(slot, node->additional_block);
+    }
+    
+    unsigned int *blocks = (unsigned int *)buf;
+    int i = 0;
+    while(i < ss[slot]->block_size / sizeof(unsigned int) && blocks[i] != 0)
+    {
+        i++;
+    }
+    if(i == ss[slot]->block_size / sizeof(unsigned int)) return -1;
+    blocks[i] = hafs_alloc_block(slot);
+
+    hafs_put_block(slot, node->additional_block, buf);
+    
+    return 0;
+}
+
+char *hafs_file_read_additional_block(int slot, unsigned int inode)
+{
+    if(slot >= cnt) return NULL;
+
+    struct inode *node = hafs_get_inode(slot, inode);
+    if(node == NULL) return NULL;
+
+    char *buf;
+
+    if((node->type & INODE_ADDITIONAL) == 0)
+    {
+        buf = (char *)malloc(1);
+        *buf = 0;
+        return buf;
+    }else{
+        buf = hafs_get_block(slot, node->additional_block);
+    }
+
+    unsigned int *blocks = (unsigned int *)buf;
+    unsigned int block_count = 0;
+    while(blocks[block_count] < ss[slot]->block_size / sizeof(unsigned int) && blocks[block_count] != 0)
+    {
+        blocks++;
+        block_count++;
+    }
+    
+    char *res = (char *)malloc(block_count * ss[slot]->block_size + 1);
+    memset(res, 0, block_count * ss[slot]->block_size + 1);
+    blocks = (unsigned int *)buf;
+    for(int i=0;i<block_count;i++)
+    {
+        memcpy(res + i * ss[slot]->block_size, hafs_get_block(slot, blocks[i]), ss[slot]->block_size);
+    }
+
+    free(buf);
+
+    return res;
+}
+
+int hafs_file_write_additional_block(int slot, unsigned int inode, char *buffer, unsigned int size)
+{
+    if(slot >= cnt) return -1;
+
+    struct inode *node = hafs_get_inode(slot, inode);
+    if(node == NULL) return -1;
+
+    char *buf;
+
+    if((node->type & INODE_ADDITIONAL) == 0)
+    {
+        if(size >= ss[slot]->block_size / sizeof(unsigned int) * ss[slot]->block_size) return -1;
+        int t = round(size, ss[slot]->block_size);
+        while(t--) hafs_file_add_additional_block(slot, inode);
+        node = hafs_get_inode(slot, inode);
+        buf = hafs_get_block(slot, node->additional_block);
+    }else{
+        buf = hafs_get_block(slot, node->additional_block);
+    }
+
+    unsigned int *blocks = (unsigned int *)buf;
+    unsigned int block_count = 0;
+    while(blocks[block_count] < ss[slot]->block_size / sizeof(unsigned int) && blocks[block_count] != 0)
+    {
+        blocks++;
+        block_count++;
+    }
+    
+    if(size > block_count * ss[slot]->block_map_size)
+    {
+        if(size >= ss[slot]->block_size / sizeof(unsigned int) * ss[slot]->block_size) return -1;
+        int t = round(size, ss[slot]->block_size) - block_count;
+        while(t--) hafs_file_add_additional_block(slot, inode);
+        node = hafs_get_inode(slot, inode);
+        block_count = round(size, ss[slot]->block_size);
+    }
+
+    char *res = (char *)malloc(block_count * ss[slot]->block_size + 1);
+    memset(res, 0, block_count * ss[slot]->block_size + 1);
+    memcpy(res, buffer, size);
+
+    buf = hafs_get_block(slot, node->additional_block);
+    blocks = (unsigned int *)buf;
+    for(int i=0;i<block_count;i++)
+    {
+        hafs_put_block(slot, blocks[i], res + i * ss[slot]->block_size);
+    }
+
+    free(res);
+
+    return -1;
+}
+
+char *hafs_file_get_long_name(int slot, unsigned int inode)
+{
+    if(slot >= cnt) return NULL;
+
+    struct inode *node = hafs_get_inode(slot, inode);
+    if(node == NULL) return NULL;
+    if((node->type & INODE_ADDITIONAL) == 0) return NULL;
+    if((node->type & INODE_LONG_NAME) == 0) return NULL;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return NULL;
+
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_LONG_NAME)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0 || *(len + 1) != ADDITION_LONG_NAME) return NULL;
+
+    char *res = (char *)malloc(*len - 4 - 4 + 1);
+    memcpy(res, point_now + 8, *len - 4 - 4);
+    res[*len - 4 - 4]=0;
+
+    return res;
+}
+
+int hafs_file_set_long_name(int slot, unsigned int inode, char *name, unsigned int namelen)
+{
+    if(slot >= cnt) return -1;
+
+    struct inode *node = hafs_get_inode(slot, inode);
+    if(node == NULL) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+    
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_LONG_NAME)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0 || *(len + 1) != ADDITION_LONG_NAME)
+    {
+        char *res = (char *)malloc(point_now - buf + namelen + 8);
+        memcpy(res, buf, point_now - buf);
+        *(unsigned int *)(res + (point_now - buf)) = namelen + 8;
+        *((unsigned int *)(res + (point_now - buf)) + 1) = ADDITION_LONG_NAME;
+        memcpy(res + (point_now - buf) + 8, name, namelen);
+        if(hafs_file_write_additional_block(slot, inode, res, point_now - buf + namelen + 8) == -1) return -1;
+        
+        struct inode *node = hafs_get_inode(slot, inode);
+        node->type |= INODE_LONG_NAME;
+        hafs_set_inode(slot, inode, node);
+
+        free(res);
+    }else{
+        char *point_start = point_now;
+        int o_len = *len;
+        while(*len != 0)
+        {
+            point_now += *len;
+            len = (unsigned int *)point_now;
+        }
+        char *res = (char *)malloc(point_now - buf + namelen);
+        memcpy(res, buf, point_start - buf);
+        memcpy(res + (point_start - buf), point_start + o_len, point_now - point_start - o_len);
+
+        *(unsigned int *)(res + (point_now - buf) - o_len) = namelen + 8;
+        *((unsigned int *)(res + (point_now - buf) - o_len) + 1) = ADDITION_LONG_NAME;
+        memcpy(res + (point_now - buf) - o_len + 8, name, namelen);
+        if(hafs_file_write_additional_block(slot, inode, res, (point_now - buf) - o_len + namelen + 8) == -1)
+        {
+            free(res);
+            return -1;
+        }
+        free(res);
+    }
+
+    return 0;
+}
+
+int hafs_file_set_fa_inode(int slot, char *filename, unsigned int namelen)
+{
+    if(slot >= cnt) return -1;
+
+    if(filename[namelen-1]=='\\') namelen--;
+	int pathlen = namelen;
+	while(filename[pathlen-1]!='\\') pathlen--;
+    namelen -= pathlen;
+
+    unsigned int inode = hafs_find_inode(slot, filename, namelen + pathlen, 0);
+    if(inode == 0) return -1;
+    unsigned int fa_inode = hafs_find_inode(slot, filename, pathlen, 0);
+
+    struct inode *node = hafs_get_inode(slot, inode);
+    if(node == NULL) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+    
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_FA_INODE)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0 || *(len + 1) != ADDITION_FA_INODE)
+    {
+        char *res = (char *)malloc(point_now - buf + 12);
+        memcpy(res, buf, point_now - buf);
+        *(unsigned int *)(res + (point_now - buf)) = 12;
+        *((unsigned int *)(res + (point_now - buf)) + 1) = ADDITION_FA_INODE;
+        *((unsigned int *)(res + (point_now - buf)) + 2) = fa_inode;
+        if(hafs_file_write_additional_block(slot, inode, res, point_now - buf + 12) == -1)
+        {
+            free(res);
+            return -1;
+        }
+        
+        free(res);
+    }else{
+        *((unsigned int *)point_now + 2) = fa_inode;
+        while(*len != 0)
+        {
+            point_now += *len;
+            len = (unsigned int *)point_now;
+        }
+        if(hafs_file_write_additional_block(slot, inode, buf, point_now - buf) == -1) return -1;
+    }
+
+    return 0;
+}
+
+int hafs_file_fa_inode_present(int slot, unsigned int inode)
+{
+    if(slot >= cnt) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_FA_INODE)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 12) return 1;
+    return 0;
+}
+
+unsigned int hafs_file_get_fa_inode(int slot, unsigned int inode)
+{
+    if(slot >= cnt) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_FA_INODE)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0) return 0;
+    return *(len + 2);
+}
+
+int hafs_file_access(int slot, unsigned int inode, unsigned int o_time)
+{
+    if(slot >= cnt) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+    if(hafs_get_file_attribute_by_inode(slot, inode) & INODE_DIR) return -1;
+
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_ACCESS_TIME)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0)
+    {
+        unsigned int size = point_now - buf;
+        char *res = (char *)malloc(size + 13);
+        memcpy(res, buf, size);
+        *(unsigned int *)(res + size) = 12;
+        *((unsigned int *)(res + size) + 1) = ADDITION_ACCESS_TIME;
+        *((unsigned int *)(res + size) + 2) = o_time;
+        *(res + size + 12) = 0;
+        if(hafs_file_write_additional_block(slot, inode, res, size + 13) == -1)
+        {
+            free(res);
+            return -1;
+        }
+
+        free(res);
+    }else{
+        *((unsigned int *)point_now + 2) = o_time;
+        while(*len != 0)
+        {
+            point_now += *len;
+            len = (unsigned int *)point_now;
+        }
+        if(hafs_file_write_additional_block(slot, inode, buf, point_now - buf) == -1) return -1;
+    }
+    
+    return 0;
+}
+
+int hafs_file_modify(int slot, unsigned int inode, unsigned int o_time)
+{
+    if(slot >= cnt) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+    if(hafs_get_file_attribute_by_inode(slot, inode) & INODE_DIR) return -1;
+
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_MODIFY_TIME)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0)
+    {
+        unsigned int size = point_now - buf;
+        char *res = (char *)malloc(size + 13);
+        memcpy(res, buf, size);
+        *(unsigned int *)(res + size) = 12;
+        *((unsigned int *)(res + size) + 1) = ADDITION_MODIFY_TIME;
+        *((unsigned int *)(res + size) + 2) = o_time;
+        *(res + size + 12) = 0;
+        if(hafs_file_write_additional_block(slot, inode, res, size + 13) == -1)
+        {
+            free(res);
+            return -1;
+        }
+
+        free(res);
+    }else{
+        *((unsigned int *)point_now + 2) = o_time;
+        while(*len != 0)
+        {
+            point_now += *len;
+            len = (unsigned int *)point_now;
+        }
+        if(hafs_file_write_additional_block(slot, inode, buf, point_now - buf) == -1) return -1;
+    }
+    
+    return 0;
+}
+
+int hafs_file_read_create_time(int slot, unsigned int inode)
+{
+    if(slot >= cnt) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_CREATE_TIME)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0)
+    {
+        return 0;
+    }else{
+        return *((unsigned int *)point_now + 2);
+    }
+    
+    return 0;
+}
+
+int hafs_file_read_access_time(int slot, unsigned int inode)
+{
+    if(slot >= cnt) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+    if(hafs_get_file_attribute_by_inode(slot, inode) & INODE_DIR) return -1;
+
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_ACCESS_TIME)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0)
+    {
+        return 0;
+    }else{
+        return *((unsigned int *)point_now + 2);
+    }
+    
+    return 0;
+}
+
+int hafs_file_read_modify_time(int slot, unsigned int inode)
+{
+    if(slot >= cnt) return -1;
+
+    char *buf = hafs_file_read_additional_block(slot, inode);
+    if(buf == NULL) return -1;
+    if(hafs_get_file_attribute_by_inode(slot, inode) & INODE_DIR) return -1;
+
+    unsigned int *len = (unsigned int *)buf;
+    char *point_now = buf;
+    while(*len != 0)
+    {
+        unsigned int type = *(len + 1);
+        if(type == ADDITION_MODIFY_TIME)
+        {
+            break;
+        }
+        point_now += *len;
+        len = (unsigned int *)point_now;
+    }
+    if(*len == 0)
+    {
+        return 0;
+    }else{
+        return *((unsigned int *)point_now + 2);
+    }
+    
+    return 0;
 }

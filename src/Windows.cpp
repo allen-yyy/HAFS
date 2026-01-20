@@ -182,7 +182,7 @@ void cmd_copy(string name1, string name2)
 			memcpy(buffer, tmp, file_size);
 		}
 	}
-	
+
 	if(!is_hafs1)
 	{
 		if(file_exists(name1))
@@ -437,8 +437,26 @@ void cmd_dir(string file_name)
 	unsigned int number = 0;
 	struct dir_entry *list=hafs_dir_list(letter2storage[toupper(file_name[0])], file_name.substr(2, file_name.size()-2).c_str(), file_name.size()-2, &number);
 	cout<<number<<" file(s) in total."<<endl;
+	cout<<"CREATE TIME      MODIFY TIME      NAME                            SIZE            <DIR>"<<endl;
 	for(int i=0;i<number;i++)
 	{
+		unsigned int o_time = hafs_file_read_create_time(letter2storage[toupper(file_name[0])], list[i].inode);
+		struct tm *tm_info = localtime((time_t *)&o_time);
+ 
+		char buffer[80];
+		strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", tm_info);
+		cout<<buffer<<" ";
+
+		o_time = hafs_file_read_modify_time(letter2storage[toupper(file_name[0])], list[i].inode);
+		tm_info = localtime((time_t *)&o_time);
+ 
+		if(o_time != -1) strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", tm_info);
+		else{
+			for(int i=0;i<16;i++) buffer[i]='-';
+			buffer[16] = 0;
+		}
+		cout<<buffer<<" ";
+
 		cout<<setw(32)<<setiosflags(ios::left)<<list[i].name;
 		cout<<setw(16)<<(hafs_get_file_attribute_by_inode(letter2storage[toupper(file_name[0])], list[i].inode)&INODE_FILE?hafs_get_file_size_by_inode(letter2storage[toupper(file_name[0])], list[i].inode):0);
 		cout<<setiosflags(ios::left)<<setw(10)<<(hafs_get_file_attribute_by_inode(letter2storage[toupper(file_name[0])], list[i].inode)&INODE_DIR?"DIR":" ")<<endl;
@@ -448,7 +466,7 @@ void cmd_dir(string file_name)
 
 int main()
 {
-	cout<<"Haribote File System (Version 1.0) CLI for Windows Version 0.9"<<endl;
+	cout<<"Haribote File System (Version 1.0) CLI for Windows Version 1.0"<<endl;
 	cout<<"(c) Allen He 2025. Distribute under MIT license."<<endl;	
 	while(1)
 	{
