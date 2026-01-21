@@ -1585,7 +1585,7 @@ int hafs_write_file(int slot, const char *file_name, unsigned int namelen, unsig
     if(hafs_put_file_data(slot, inode, block_start, round(node->file_size, ss[slot]->block_size) - block_start, res) == -1)
     {
         return -1;
-        fres(res);
+        free(res);
     }
 
     free(res);
